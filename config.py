@@ -22,11 +22,11 @@ class Config:
 
 class DevelopmentConfig(Config):
     DEBUG = True
-    CORS_ORIGINS = ['http://localhost:3000']  # React's default port
+    CORS_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173']  # React's default port
 
 class ProductionConfig(Config):
     DEBUG = False
-    CORS_ORIGINS = ['https://your-production-domain.com']
+    CORS_ORIGINS = ['https://richainfosys.com', 'https://www.richainfosys.com']
 
 # Dictionary to map config names to classes
 config = {
