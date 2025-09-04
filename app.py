@@ -9,6 +9,8 @@ from email.mime.application import MIMEApplication
 from werkzeug.utils import secure_filename
 from functools import wraps
 import datetime
+import threading
+import time
 from config import config
 
 # Load environment variables
@@ -22,7 +24,12 @@ CORS(
     app,
     resources={
         r"/*": {
-            "origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
+            "origins": [
+                "http://localhost:5173", 
+                "http://127.0.0.1:5173",
+                "https://richainfosys.com",
+                "https://www.richainfosys.com"
+            ],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
             "supports_credentials": True,
@@ -30,6 +37,33 @@ CORS(
         }
     }
 )
+
+# In-memory tracking to prevent duplicate emails (in production, use Redis or database)
+recent_submissions = {}
+SUBMISSION_COOLDOWN = 60  # 60 seconds cooldown between same requests
+
+def create_submission_key(data):
+    """Create a unique key for submission tracking"""
+    return f"{data.get('email', '').lower()}_{data.get('category', '')}_{len(data.get('selectedPdfs', []))}"
+
+def is_duplicate_submission(data):
+    """Check if this is a duplicate submission within cooldown period"""
+    key = create_submission_key(data)
+    current_time = time.time()
+    
+    if key in recent_submissions:
+        last_submission = recent_submissions[key]
+        if current_time - last_submission < SUBMISSION_COOLDOWN:
+            return True
+    
+    # Clean old entries (older than cooldown period)
+    keys_to_remove = [k for k, v in recent_submissions.items() if current_time - v > SUBMISSION_COOLDOWN]
+    for k in keys_to_remove:
+        del recent_submissions[k]
+    
+    # Record this submission
+    recent_submissions[key] = current_time
+    return False
 
 def send_contact_email(form_data):
     """Send an email with the contact form data"""
@@ -229,66 +263,92 @@ def health_check():
     }), 200
 
 def send_pdf_download_email(form_data):
-    """Send an email with the requested PDFs to both admin and user"""
+    """Send a single email with the requested PDFs to both admin and user"""
     try:
-        # Create message for admin
-        admin_msg = MIMEMultipart()
-        admin_msg['From'] = app.config['MAIL_DEFAULT_SENDER']
-        admin_msg['To'] = 'inquiryril@gmail.com'  # Updated to use inquiryril@gmail.com
-        admin_msg['Subject'] = f"New PDF Download Request - {form_data.get('firstName', '')} {form_data.get('lastName', '')}"
-        
-        # Admin email body with all form data
+        # Get form data with fallbacks
         first_name = form_data.get('firstName', 'Not provided')
         last_name = form_data.get('lastName', '')
         email = form_data.get('email', 'Not provided')
         phone = form_data.get('phone', 'Not provided')
-        company = form_data.get('company', 'Not provided')
+        company = form_data.get('organization', 'Not provided')  # Changed from 'company' to 'organization'
         category = form_data.get('category', 'Not specified')
-        pdf_list = ''.join([f'<li>{pdf}</li>' for pdf in form_data.get('selectedPdfs', [])])
+        selected_pdfs = form_data.get('selectedPdfs', [])
         
+        # Map PDF values to readable names for email
+        pdf_name_mapping = {
+            'interactive-panel1': 'Interactive Panel-AI Software',
+            'video-conf1': 'Video Conference Systems',
+            'digital-signage1': 'Wallmount Digital Signage',
+            'digital-signage2': 'Standee Digital Signage',
+            'digital-signage3': 'A-Frame Digital Signage',
+            'digital-podium1': 'Digital Podium',
+            'kiosk1': 'Interactive Kiosk',
+            'company-profile1': 'RIL - Company Profile'
+        }
+        
+        # Get readable PDF names
+        pdf_names = [pdf_name_mapping.get(pdf, pdf) for pdf in selected_pdfs]
+        pdf_list_html = ''.join([f'<li style="margin: 5px 0; padding: 5px 0; border-bottom: 1px solid #eee;">{pdf}</li>' for pdf in pdf_names])
+        
+        # Create message for admin
+        admin_msg = MIMEMultipart()
+        admin_msg['From'] = app.config['MAIL_DEFAULT_SENDER']
+        admin_msg['To'] = 'inquiryril@gmail.com'
+        admin_msg['Subject'] = f"PDF Download Request - {first_name} {last_name}"
+        
+        # Admin email body
         admin_body = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; }}
-                .header {{ background-color: #007bff; color: white; padding: 20px; text-align: center; }}
-                .content {{ padding: 20px; border: 1px solid #e0e0e0; }}
-                .footer {{ background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 12px; color: #6c757d; }}
-                .info-label {{ font-weight: bold; color: #495057; }}
-                .pdf-list {{ background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin: 10px 0; }}
-                .pdf-item {{ margin: 5px 0; padding-left: 10px; border-left: 3px solid #007bff; }}
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; background-color: #f8f9fa; }}
+                .container {{ background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+                .header {{ background: linear-gradient(135deg, #007bff, #0056b3); color: white; padding: 30px; text-align: center; }}
+                .header h2 {{ margin: 0; font-size: 24px; font-weight: 600; }}
+                .content {{ padding: 30px; }}
+                .info-section {{ background-color: #f8f9fa; padding: 20px; border-radius: 6px; margin: 20px 0; }}
+                .info-label {{ font-weight: 600; color: #495057; display: inline-block; min-width: 80px; }}
+                .pdf-list {{ background-color: #e3f2fd; padding: 20px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #007bff; }}
+                .pdf-list h3 {{ color: #007bff; margin-top: 0; }}
+                .pdf-item {{ background-color: white; margin: 8px 0; padding: 10px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+                .footer {{ background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #6c757d; border-top: 1px solid #dee2e6; }}
+                .next-steps {{ background-color: #fff3cd; padding: 15px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #ffc107; }}
             </style>
         </head>
         <body>
-            <div class="header">
-                <h2>New PDF Download Request</h2>
-            </div>
-            
-            <div class="content">
-                <p>You have received a new request for PDF downloads with the following details:</p>
-                
-                <div style="margin: 20px 0;">
-                    <p><span class="info-label">Name:</span> {first_name} {last_name}</p>
-                    <p><span class="info-label">Email:</span> <a href="mailto:{email}">{email}</a></p>
-                    <p><span class="info-label">Phone:</span> <a href="tel:{phone}">{phone}</a></p>
-                    <p><span class="info-label">Company:</span> {company}</p>
-                    <p><span class="info-label">Category:</span> {category}</p>
+            <div class="container">
+                <div class="header">
+                    <h2>📄 New PDF Download Request</h2>
+                    <p style="margin: 10px 0 0 0; opacity: 0.9;">Request received at {datetime.datetime.now().strftime('%B %d, %Y at %I:%M %p')}</p>
                 </div>
                 
-                <div class="pdf-list">
-                    <p class="info-label">Requested Documents:</p>
-                    {''.join([f'<div class="pdf-item">• {pdf}</div>' for pdf in form_data.get('selectedPdfs', [])])}
+                <div class="content">
+                    <div class="info-section">
+                        <h3 style="color: #007bff; margin-top: 0;">👤 Customer Information</h3>
+                        <p><span class="info-label">Name:</span> {first_name} {last_name}</p>
+                        <p><span class="info-label">Email:</span> <a href="mailto:{email}" style="color: #007bff; text-decoration: none;">{email}</a></p>
+                        <p><span class="info-label">Phone:</span> <a href="tel:{phone}" style="color: #007bff; text-decoration: none;">{phone}</a></p>
+                        <p><span class="info-label">Organization:</span> {company}</p>
+                        <p><span class="info-label">Category:</span> <span style="background-color: #007bff; color: white; padding: 2px 8px; border-radius: 3px; font-size: 12px;">{category.replace('-', ' ').title()}</span></p>
+                    </div>
+                    
+                    <div class="pdf-list">
+                        <h3>📋 Requested Documents ({len(pdf_names)} items)</h3>
+                        <ul style="list-style: none; padding: 0; margin: 10px 0;">
+                            {pdf_list_html}
+                        </ul>
+                    </div>
+                    
+                    <div class="next-steps">
+                        <p style="margin: 0;"><strong>⚡ Action Required:</strong> Please review this request and send the requested PDFs to the customer's email address.</p>
+                    </div>
                 </div>
                 
-                <p style="margin-top: 20px;">
-                    <strong>Next Steps:</strong> Please review this request and follow up with the user if necessary.
-                </p>
-            </div>
-            
-            <div class="footer">
-                <p>This is an automated notification from Richa Infosystem. Please do not reply to this email.</p>
-                <p>© {datetime.datetime.now().year} Richa Infosystem. All rights reserved.</p>
+                <div class="footer">
+                    <p><strong>Richa Infosystem</strong> - Automated Notification System</p>
+                    <p>© {datetime.datetime.now().year} Richa Infosystem. All rights reserved.</p>
+                </div>
             </div>
         </body>
         </html>
@@ -296,73 +356,75 @@ def send_pdf_download_email(form_data):
         
         admin_msg.attach(MIMEText(admin_body, 'html'))
         
-        # Create message for user
+        # Create message for user (acknowledgment)
         user_msg = MIMEMultipart()
         user_msg['From'] = app.config['MAIL_DEFAULT_SENDER']
-        user_msg['To'] = form_data.get('email')
-        user_msg['Subject'] = "Your Requested PDFs from Richa Infosystem"
+        user_msg['To'] = email
+        user_msg['Subject'] = "Thank you for your interest - Richa Infosystem"
         
         # User email body
-        first_name = form_data.get('firstName', 'Valued Customer')
-        pdf_list = ''.join([f'<li>{pdf}</li>' for pdf in form_data.get('selectedPdfs', [])])
-        
         user_body = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; }}
-                .header {{ background-color: #007bff; color: white; padding: 20px; text-align: center; }}
-                .content {{ padding: 20px; border: 1px solid #e0e0e0; }}
-                .button {{ 
-                    display: inline-block; 
-                    padding: 10px 20px; 
-                    background-color: #28a745; 
-                    color: white; 
-                    text-decoration: none; 
-                    border-radius: 4px; 
-                    margin: 15px 0;
-                }}
-                .footer {{ background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 12px; color: #6c757d; }}
-                .pdf-list {{ background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin: 15px 0; }}
-                .pdf-item {{ margin: 5px 0; }}
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; background-color: #f8f9fa; }}
+                .container {{ background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+                .header {{ background: linear-gradient(135deg, #28a745, #1e7e34); color: white; padding: 30px; text-align: center; }}
+                .header h2 {{ margin: 0; font-size: 24px; font-weight: 600; }}
+                .content {{ padding: 30px; }}
+                .pdf-list {{ background-color: #f8f9fa; padding: 20px; border-radius: 6px; margin: 20px 0; }}
+                .pdf-item {{ background-color: white; margin: 8px 0; padding: 10px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+                .footer {{ background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #6c757d; border-top: 1px solid #dee2e6; }}
+                .contact-info {{ background-color: #e3f2fd; padding: 15px; border-radius: 6px; margin: 20px 0; }}
+                .highlight {{ background-color: #fff3cd; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #ffc107; }}
             </style>
         </head>
         <body>
-            <div class="header">
-                <h2>Thank You for Contacting Richa Infosystem</h2>
-            </div>
-            
-            <div class="content">
-                <p>Dear {first_name},</p>
-                
-                <p>Thank you for your interest in our products/services. We've received your request for the following documents:</p>
-                
-                <div class="pdf-list">
-                    {''.join([f'<div class="pdf-item">• {pdf}</div>' for pdf in form_data.get('selectedPdfs', [])])}
+            <div class="container">
+                <div class="header">
+                    <h2>🙏 Thank You for Your Interest!</h2>
+                    <p style="margin: 10px 0 0 0; opacity: 0.9;">Your request has been successfully received</p>
                 </div>
                 
-                <p>Our team is currently processing your request and will get back to you within 24-48 hours.</p>
+                <div class="content">
+                    <p>Dear {first_name},</p>
+                    
+                    <p>Thank you for your interest in our products and services. We have successfully received your request for the following documents:</p>
+                    
+                    <div class="pdf-list">
+                        <h3 style="color: #007bff; margin-top: 0;">📋 Your Requested Documents:</h3>
+                        <ul style="list-style: none; padding: 0; margin: 10px 0;">
+                            {pdf_list_html}
+                        </ul>
+                    </div>
+                    
+                    <div class="highlight">
+                        <p style="margin: 0;"><strong>📧 What's Next?</strong> Our team will review your request and send the requested PDFs to your email address within 24-48 hours.</p>
+                    </div>
+                    
+                    <div class="contact-info">
+                        <h3 style="color: #007bff; margin-top: 0;">📞 Need Immediate Assistance?</h3>
+                        <p style="margin: 5px 0;">Email: <a href="mailto:info@richainfosys.com" style="color: #007bff; text-decoration: none;">info@richainfosys.com</a></p>
+                        <p style="margin: 5px 0;">Phone: +91-XXXXXXXXXX</p>
+                    </div>
+                    
+                    <p>We appreciate your interest in Richa Infosystem and look forward to serving you.</p>
+                    
+                    <p style="margin-top: 25px;">
+                        Best regards,<br>
+                        <strong style="color: #007bff;">The Richa Infosystem Team</strong>
+                    </p>
+                </div>
                 
-                <p>For your reference, here are the details you provided:</p>
-                <p><strong>Email:</strong> {email}<br>
-                <strong>Phone:</strong> {phone}</p>
-                
-                <p>If you have any questions or need immediate assistance, feel free to contact us at <a href="mailto:info@richainfosys.com">info@richainfosys.com</a> or call us at +91-XXXXXXXXXX.</p>
-                
-                <p>Thank you for choosing Richa Infosystem.</p>
-                
-                <p>Best regards,<br>
-                <strong>The Richa Infosystem Team</strong></p>
-            </div>
-            
-            <div class="footer">
-                <p>This is an automated message. Please do not reply to this email.</p>
-                <p>© {datetime.datetime.now().year} Richa Infosystem. All rights reserved.</p>
-                <p>Our mailing address is:<br>
-                Richa Infosystem<br>
-                [Your Company Address]<br>
-                [City, State, ZIP]</p>
+                <div class="footer">
+                    <p><strong>Richa Infosystem</strong> - Your Technology Partner</p>
+                    <p>© {datetime.datetime.now().year} Richa Infosystem. All rights reserved.</p>
+                    <p style="margin-top: 10px; font-size: 11px;">
+                        This is an automated message. Please do not reply to this email.<br>
+                        If you have questions, contact us at info@richainfosys.com
+                    </p>
+                </div>
             </div>
         </body>
         </html>
@@ -370,7 +432,7 @@ def send_pdf_download_email(form_data):
         
         user_msg.attach(MIMEText(user_body, 'html'))
         
-        # Connect to SMTP server and send both emails
+        # Send emails using a single SMTP connection
         with smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT']) as server:
             if app.config['MAIL_USE_TLS']:
                 server.starttls()
@@ -378,13 +440,17 @@ def send_pdf_download_email(form_data):
             
             # Send admin email
             server.send_message(admin_msg)
+            print(f"Admin email sent successfully for {first_name} {last_name}")
             
             # Send user email if email is provided
-            if form_data.get('email'):
+            if email and email.strip():
                 server.send_message(user_msg)
+                print(f"User acknowledgment email sent to {email}")
             
         return True, None
+        
     except Exception as e:
+        print(f"Error in send_pdf_download_email: {str(e)}")
         return False, str(e)
 
 def is_valid_email(email):
@@ -398,9 +464,16 @@ def request_downloads():
     try:
         data = request.get_json()
         
+        # Check for duplicate submission
+        if is_duplicate_submission(data):
+            return jsonify({
+                'success': False,
+                'message': 'Request already submitted recently. Please wait before submitting again.'
+            }), 429
+        
         # Validate email format
         user_email = data.get('email', '').strip()
-        if user_email and not is_valid_email(user_email):
+        if not user_email or not is_valid_email(user_email):
             return jsonify({
                 'success': False,
                 'message': 'Please enter a valid email address.'
@@ -408,31 +481,45 @@ def request_downloads():
         
         # Validate required fields
         required_fields = ['firstName', 'lastName', 'email', 'phone', 'selectedPdfs', 'category']
+        missing_fields = []
+        
         for field in required_fields:
             if field not in data or not data[field]:
-                return jsonify({
-                    'success': False,
-                    'message': f'Missing required field: {field}'
-                }), 400
+                missing_fields.append(field)
         
-        # Send email with PDF links
+        if missing_fields:
+            return jsonify({
+                'success': False,
+                'message': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+        
+        # Validate selectedPdfs is not empty
+        if not isinstance(data.get('selectedPdfs'), list) or len(data.get('selectedPdfs', [])) == 0:
+            return jsonify({
+                'success': False,
+                'message': 'Please select at least one PDF document.'
+            }), 400
+        
+        # Send email with PDF information
         success, error = send_pdf_download_email(data)
         
         if not success:
+            print(f"Failed to send PDF download email: {error}")
             return jsonify({
                 'success': False,
-                'message': f'Failed to send email: {error}'
+                'message': f'Failed to process your request: {error}'
             }), 500
             
         return jsonify({
             'success': True,
-            'message': 'Your PDFs have been sent to your email!'
+            'message': 'Thank you! Your request has been received and will be processed shortly.'
         })
         
     except Exception as e:
+        print(f"Error in request_downloads: {str(e)}")
         return jsonify({
             'success': False,
-            'message': f'An error occurred: {str(e)}'
+            'message': f'An unexpected error occurred: {str(e)}'
         }), 500
 
 if __name__ == '__main__':
