@@ -40,7 +40,8 @@ CORS(
 
 # In-memory tracking to prevent duplicate emails (in production, use Redis or database)
 recent_submissions = {}
-SUBMISSION_COOLDOWN = 60  # 60 seconds cooldown between same requests
+# Cooldown period in seconds (30 seconds is more user-friendly for testing)
+SUBMISSION_COOLDOWN = 30
 
 def create_submission_key(data):
     """Create a unique key for submission tracking"""
